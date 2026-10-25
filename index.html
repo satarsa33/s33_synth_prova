@@ -1,3 +1,6 @@
+Ecco l'evoluzione del codice. Abbiamo aggiornato l'applicazione introducendo un sistema di cavi grafici dinamici gestiti tramite un Canvas SVG in background, punti di ancoraggio (Input/Output) cliccabili e il supporto completo per la tastiera del PC (da Asdf...) per suonare in modalità monofonica (legato).
+Sostituisci il contenuto del tuo file index.html con questo codice aggiornato:
+html
 <!DOCTYPE html>
 <html lang="it">
 <head>
@@ -22,6 +25,7 @@
             display: flex;
             flex-direction: column;
             height: 100vh;
+            user-select: none;
         }
         header {
             background-color: var(--panel-color);
@@ -30,6 +34,7 @@
             gap: 15px;
             align-items: center;
             border-bottom: 2px solid #2d2d2d;
+            z-index: 10;
         }
         button {
             background-color: #2d2d2d;
@@ -40,162 +45,312 @@
             border-radius: 4px;
             font-weight: bold;
         }
-        button:hover {
-            background-color: var(--accent-color);
-            color: #000;
-        }
-        #workspace {
+        button:hover { background-color: var(--accent-color); color: #000; }
+        
+        #workspace-container {
             flex: 1;
             position: relative;
             background-image: radial-gradient(#2d2d2d 1px, transparent 1px);
             background-size: 20px 20px;
         }
+        
+        /* Canvas SVG per disegnare i cavi */
+        #cable-svg {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+
         .module {
             position: absolute;
             background-color: var(--panel-color);
             border: 2px solid #444;
             border-radius: 6px;
-            width: 160px;
+            width: 170px;
             padding: 10px;
             cursor: move;
             box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            z-index: 2;
         }
         .module h4 { margin: 0 0 10px 0; border-bottom: 1px solid #444; padding-bottom: 5px; color: var(--accent-color); }
-        .module label { font-size: 12px; display: block; margin-bottom: 5px; }
-        .module input, .module select { width: 100%; margin-bottom: 10px; background: #2d2d2d; color: #fff; border: 1px solid #555; }
+        .module label { font-size: 11px; display: block; margin-bottom: 3px; color: #aaa; }
+        .module input, .module select { width: 100%; margin-bottom: 8px; background: #2d2d2d; color: #fff; border: 1px solid #555; box-sizing: border-box; }
+        
+        /* Punti di Ancoraggio (Jack) */
+        .jack-container {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 5px;
+            padding-top: 5px;
+            border-top: 1px dashed #444;
+        }
+        .jack {
+            width: 12px;
+            height: 12px;
+            background-color: #555;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            cursor: pointer;
+            display: inline-block;
+            position: relative;
+        }
+        .jack:hover { background-color: var(--accent-color); }
+        .jack.selected { background-color: #ff0055; box-shadow: 0 0 8px #ff0055; }
+        .jack-label { font-size: 9px; block-size: auto; text-transform: uppercase; color: #fff; }
     </style>
 </head>
 <body>
 
     <header>
         <h2>Modular Synth PWA</h2>
-        <button onclick="audioEngine.startContext()">Attiva Audio</button>
+        <button onclick="audioEngine.startContext()">1. Attiva Audio</button>
         <button onclick="audioEngine.createOscillator()">+ Oscillatore</button>
-        <button onclick="audioEngine.createFilter()">+ Filtro Master</button>
+        <button onclick="audioEngine.createFilter()">+ Filtro Passa-Basso</button>
+        <div style="margin-left: auto; font-size: 13px; color: #888;">Usa la tastiera: <strong style="color:var(--accent-color)">A S D F G H J K</strong> (Do Re Mi...)</div>
         <button id="installBtn" style="display:none; background-color: var(--accent-color); color: #000;">Installa App</button>
     </header>
 
-    <div id="workspace">
-        <!-- Il Master Output è fisso all'inizio -->
-        <div class="module" style="right: 20px; top: 20px; cursor: default;">
+    <div id="workspace-container">
+        <svg id="cable-svg"></svg>
+        
+        <!-- Master Output Modulo Fisso -->
+        <div class="module" id="mod-master" style="right: 40px; top: 40px; cursor: default;">
             <h4>Master Out</h4>
             <label>Volume Generale</label>
-            <input type="range" id="masterVolume" min="0" max="1" step="0.01" value="0.5">
+            <input type="range" id="masterVolume" min="0" max="1" step="0.01" value="0.4">
+            <div class="jack-container">
+                <div>
+                    <div class="jack" id="jack-master-in" data-type="input"></div>
+                    <span class="jack-label">In</span>
+                </div>
+                <div></div>
+            </div>
         </div>
     </div>
 
 <script>
-// --- AUDIO ENGINE (Web Audio API) ---
+// Mappatura tastiera PC (Layout Piano: A=Do, W=Do#, S=Re...)
+const KEY_TO_NOTE = {
+    'a': 60, 'w': 61, 's': 62, 'e': 63, 'd': 64, 'f': 65, 't': 66, 'g': 67, 'y': 68, 'h': 69, 'u': 70, 'j': 71, 'k': 72
+};
+function midiToFreq(note) { return 440 * Math.pow(2, (note - 69) / 12); }
+
+// --- AUDIO ENGINE ---
 class AudioEngine {
     constructor() {
         this.ctx = null;
         this.masterGain = null;
-        this.modules = [];
+        this.currentJackSource = null; 
+        this.connections = []; // Tiene traccia delle connessioni {fromId, toId, line}
+        this.oscillators = []; // Lista di oscillatori attivi per la tastiera
+        this.currentNote = null;
     }
 
     startContext() {
         if (!this.ctx) {
             this.ctx = new (window.AudioContext || window.webkitAudioContext)();
             this.masterGain = this.ctx.createGain();
-            this.masterGain.gain.setValueAtTime(0.5, this.ctx.currentTime);
+            this.masterGain.gain.setValueAtTime(0.4, this.ctx.currentTime);
             this.masterGain.connect(this.ctx.destination);
             
-            // Collega lo slider del volume master
             document.getElementById('masterVolume').addEventListener('input', (e) => {
                 this.masterGain.gain.setValueAtTime(e.target.value, this.ctx.currentTime);
             });
+            
+            // Inizializza l'ancoraggio del Master
+            document.getElementById('jack-master-in').audioNode = this.masterGain;
+            this.setupKeyboard();
         }
     }
 
     createOscillator() {
         this.startContext();
+        let id = 'osc-' + Date.now();
         let osc = this.ctx.createOscillator();
-        let gain = this.ctx.createGain();
+        let gain = this.ctx.createGain(); // Gain locale per controllare il volume dell'osc
         
         osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(220, this.ctx.currentTime);
-        gain.gain.setValueAtTime(0.2, this.ctx.currentTime); // volume iniziale basso per sicurezza
-        
+        osc.frequency.setValueAtTime(261.63, this.ctx.currentTime); // Do centrale di partenza
+        gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
         osc.connect(gain);
-        // Di default lo colleghiamo al master, in un sistema complesso useremmo nodi di routing
-        gain.connect(this.masterGain); 
         osc.start();
 
-        this.renderModuleVisual('Oscillatore', (dom) => {
+        // Registriamo l'oscillatore per poterlo controllare via tastiera
+        this.oscillators.push({ osc: osc, baseFreq: 261.63 });
+
+        this.renderModuleVisual(id, 'Oscillatore', (dom) => {
             dom.innerHTML += `
                 <label>Tipo Onda</label>
-                <select class="waveType"><option value="sawtooth">Sega</option><option value="square">Quadra</option><option value="sine">Sinu</option></select>
-                <label>Frequenza (Hz)</label>
-                <input type="range" class="freq" min="60" max="1500" value="220">
+                <select><option value="sawtooth">Sega</option><option value="square">Quadra</option><option value="triangle">Triangolare</option></select>
                 <label>Volume</label>
-                <input type="range" class="vol" min="0" max="1" step="0.05" value="0.2">
+                <input type="range" min="0" max="1" step="0.05" value="0.3">
+                <div class="jack-container">
+                    <div></div>
+                    <div style="text-align:right">
+                        <span class="jack-label">Out</span>
+                        <div class="jack" id="jack-${id}-out" data-type="output"></div>
+                    </div>
+                </div>
             `;
-            dom.querySelector('.waveType').addEventListener('change', (e) => osc.type = e.target.value);
-            dom.querySelector('.freq').addEventListener('input', (e) => osc.frequency.setValueAtTime(e.target.value, this.ctx.currentTime));
-            dom.querySelector('.vol').addEventListener('input', (e) => gain.gain.setValueAtTime(e.target.value, this.ctx.currentTime));
+            dom.querySelector('select').addEventListener('change', (e) => osc.type = e.target.value);
+            dom.querySelector('input').addEventListener('input', (e) => gain.gain.setValueAtTime(e.target.value, this.ctx.currentTime));
+            
+            // Assegna il nodo audio di uscita al Jack Out
+            dom.querySelector('.jack[data-type="output"]').audioNode = gain;
         });
     }
 
     createFilter() {
         this.startContext();
-        // Logica per inserire un filtro nella catena (semplificata nel prototipo)
-        alert("Filtro creato! In una versione completa, useresti linee di collegamento (cavi virtuali) tra i moduli.");
+        let id = 'flt-' + Date.now();
+        let filter = this.ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(1000, this.ctx.currentTime);
+        filter.Q.setValueAtTime(1, this.ctx.currentTime);
+
+        this.renderModuleVisual(id, 'Filtro LP', (dom) => {
+            dom.innerHTML += `
+                <label>Cutoff (Hz)</label>
+                <input type="range" class="cut" min="60" max="5000" value="1000">
+                <label>Risonanza</label>
+                <input type="range" class="q" min="0.1" max="20" step="0.1" value="1">
+                <div class="jack-container">
+                    <div>
+                        <div class="jack" id="jack-${id}-in" data-type="input"></div>
+                        <span class="jack-label">In</span>
+                    </div>
+                    <div style="text-align:right">
+                        <span class="jack-label">Out</span>
+                        <div class="jack" id="jack-${id}-out" data-type="output"></div>
+                    </div>
+                </div>
+            `;
+            dom.querySelector('.cut').addEventListener('input', (e) => filter.frequency.setValueAtTime(e.target.value, this.ctx.currentTime));
+            dom.querySelector('.q').addEventListener('input', (e) => filter.Q.setValueAtTime(e.target.value, this.ctx.currentTime));
+            
+            dom.querySelector('.jack[data-type="input"]').audioNode = filter;
+            dom.querySelector('.jack[data-type="output"]').audioNode = filter;
+        });
     }
 
-    renderModuleVisual(title, setupControlsFn) {
+    renderModuleVisual(id, title, setupControlsFn) {
         let el = document.createElement('div');
         el.className = 'module';
+        el.id = id;
         el.style.left = '50px';
-        el.style.top = '100px';
+        el.style.top = '120px';
         el.innerHTML = `<h4>${title}</h4>`;
         
         setupControlsFn(el);
-        document.getElementById('workspace').appendChild(el);
+        document.getElementById('workspace-container').appendChild(el);
         this.makeDraggable(el);
+        this.setupJackEvents(el);
     }
 
-    makeDraggable(el) {
-        let posX = 0, posY = 0, mouseX = 0, mouseY = 0;
-        el.onmousedown = (e) => {
-            if(e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return; // Non dragga se usi i controlli
-            e.preventDefault();
-            mouseX = e.clientX;
-            mouseY = e.clientY;
-            document.onmouseup = () => { document.onmouseup = null; document.onmousemove = null; };
-            document.onmousemove = (e) => {
-                posX = mouseX - e.clientX;
-                posY = mouseY - e.clientY;
-                mouseX = e.clientX;
-                mouseY = e.clientY;
-                el.style.top = (el.offsetTop - posY) + "px";
-                el.style.left = (el.offsetLeft - posX) + "px";
-            };
-        };
-    }
+    setupJackEvents(moduleEl) {
+        moduleEl.querySelectorAll('.jack').forEach(jack => {
+Usa il codice con cautela.
+jack.addEventListener('click', (e) => {
+e.stopPropagation();
+this.handleJackClick(jack);
+});
+});
 }
-
+handleJackClick(jack) {
+if (!this.currentJackSource) {
+// Primo click: seleziona la sorgente (deve essere un output)
+if (jack.dataset.type === 'output') {
+this.currentJackSource = jack;
+jack.classList.add('selected');
+}
+} else {
+// Secondo click: destinazione (deve essere un input del modulo differente)
+if (jack.dataset.type === 'input' && this.currentJackSource !== jack) {
+// Esegui il collegamento audio nativo
+this.currentJackSource.audioNode.connect(jack.audioNode);
+// Disegna il cavo visivo
+this.drawCable(this.currentJackSource, jack);
+}
+// Reset selezione
+this.currentJackSource.classList.remove('selected');
+this.currentJackSource = null;
+}
+}
+drawCable(jackOut, jackIn) {
+let svg = document.getElementById('cable-svg');
+let line = document.createElementNS('w3.org', 'line');
+line.setAttribute('stroke', 'var(--accent-color)');
+line.setAttribute('stroke-width', '3');
+line.setAttribute('stroke-linecap', 'round');
+svg.appendChild(line);
+let connection = { from: jackOut, to: jackIn, line: line };
+this.connections.push(connection);
+this.updateCablePosition(connection);
+}
+updateCablePosition(conn) {
+let rOut = conn.from.getBoundingClientRect();
+let rIn = conn.to.getBoundingClientRect();
+let rWorkspace = document.getElementById('workspace-container').getBoundingClientRect();
+conn.line.setAttribute('x1', rOut.left - rWorkspace.left + 6);
+conn.line.setAttribute('y1', rOut.top - rWorkspace.top + 6);
+conn.line.setAttribute('x2', rIn.left - rWorkspace.left + 6);
+conn.line.setAttribute('y2', rIn.top - rWorkspace.top + 6);
+}
+updateAllCables() {
+this.connections.forEach(conn => this.updateCablePosition(conn));
+}
+makeDraggable(el) {
+let posX = 0, posY = 0, mouseX = 0, mouseY = 0;
+el.onmousedown = (e) => {
+if(['INPUT', 'SELECT', 'OPTION'].includes(e.target.tagName) || e.target.classList.contains('jack')) return;
+e.preventDefault();
+mouseX = e.clientX;
+mouseY = e.clientY;
+document.onmouseup = () => { document.onmouseup = null; document.onmousemove = null; };
+document.onmousemove = (e) => {
+posX = mouseX - e.clientX;
+posY = mouseY - e.clientY;
+mouseX = e.clientX;
+mouseY = e.clientY;
+el.style.top = (el.offsetTop - posY) + "px";
+el.style.left = (el.offsetLeft - posX) + "px";
+this.updateAllCables(); // Ricalcola la posizione dei cavi durante il drag
+};
+};
+}
+setupKeyboard() {
+window.addEventListener('keydown', (e) => {
+if (e.repeat) return;
+let key = e.key.toLowerCase();
+if (KEY_TO_NOTE[key] !== undefined) {
+this.currentNote = KEY_TO_NOTE[key];
+let targetFreq = midiToFreq(this.currentNote);
+// Aggiorna la frequenza di tutti gli oscillatori attivi (Monofonico)
+this.oscillators.forEach(item => {
+item.osc.frequency.setValueAtTime(targetFreq, this.ctx.currentTime);
+});
+}
+});
+}
+}
 const audioEngine = new AudioEngine();
-
-// --- LOGICA PWA (Service Worker & Installazione) ---
+// Inizializza subito il jack del modulo master fisso
+audioEngine.setupJackEvents(document.getElementById('mod-master'));
+// --- LOGICA PWA ---
 if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(err => console.log("SW errore:", err));
+navigator.serviceWorker.register('sw.js').catch(err => console.log("SW errore:", err));
 }
 
-let deferredPrompt;
-window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    deferredPrompt = e;
-    document.getElementById('installBtn').style.display = 'block';
-});
 
-document.getElementById('installBtn').addEventListener('click', async () => {
-    if (deferredPrompt) {
-        deferredPrompt.prompt();
-        const { outcome } = await deferredPrompt.userChoice;
-        if (outcome === 'accepted') document.getElementById('installBtn').style.display = 'none';
-        deferredPrompt = null;
-    }
-});
-</script>
-</body>
-</html>
+
+### Come utilizzare il nuovo sistema:
+1. Clicca su **"1. Attiva Audio"** per sbloccare il motore di sintesi del browser.
+2. Crea un modulo cliccando su **"+ Oscillatore"**.
+3. Per collegarlo, fai **click sul cerchietto bianco (Out)** dell'oscillatore e poi fai **click sul cerchietto bianco (In)** del modulo *Master Out*. Apparirà un cavo verde e inizierai a sentire il suono base!
+4. Premi i tasti della tastiera del tuo computer (es. **A, S, D, F, G, H, J, K**) per cambiare l'intonazione della nota in tempo reale.
+5. Puoi inserire un **Filtro Passa-Basso** in mezzo: scollega o crea un filtro, collega l'Out dell'oscillatore all'In del filtro, e l'Out del filtro all'In del Master.
+
+<FollowUp>
+Il sistema adesso è interattivo! Come preferisci procedere? Vuoi implementare la possibilità di **scollegare un cavo** cliccandoci sopra, oppure vogliamo aggiungere un modulo **ADSR (Inviluppo)** per evitare che l'oscillatore suoni continuamente, facendolo suonare solo alla pressione del tasto?
+</FollowUp>
