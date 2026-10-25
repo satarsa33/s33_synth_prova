@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modular Web Synth PWA</title>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#1a1a1a">
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-color: #1e1e1e;
+            --accent-color: #00ff9d;
+            --text-color: #ffffff;
+        }
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        header {
+            background-color: var(--panel-color);
+            padding: 10px 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            border-bottom: 2px solid #2d2d2d;
+        }
+        button {
+            background-color: #2d2d2d;
+            color: var(--text-color);
+            border: 1px solid #444;
+            padding: 8px 15px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        button:hover {
+            background-color: var(--accent-color);
+            color: #000;
+        }
+        #workspace {
+            flex: 1;
+            position: relative;
+            background-image: radial-gradient(#2d2d2d 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        .module {
+            position: absolute;
+            background-color: var(--panel-color);
+            border: 2px solid #444;
+            border-radius: 6px;
+            width: 160px;
+            padding: 10px;
+            cursor: move;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        }
+        .module h4 { margin: 0 0 10px 0; border-bottom: 1px solid #444; padding-bottom: 5px; color: var(--accent-color); }
+        .module label { font-size: 12px; display: block; margin-bottom: 5px; }
+        .module input, .module select { width: 100%; margin-bottom: 10px; background: #2d2d2d; color: #fff; border: 1px solid #555; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h2>Modular Synth PWA</h2>
+        <button onclick="audioEngine.startContext()">Attiva Audio</button>
+        <button onclick="audioEngine.createOscillator()">+ Oscillatore</button>
+        <button onclick="audioEngine.createFilter()">+ Filtro Master</button>
+        <button id="installBtn" style="display:none; background-color: var(--accent-color); color: #000;">Installa App</button>
+    </header>
+
+    <div id="workspace">
+        <!-- Il Master Output è fisso all'inizio -->
+        <div class="module" style="right: 20px; top: 20px; cursor: default;">
+            <h4>Master Out</h4>
+            <label>Volume Generale</label>
+            <input type="range" id="masterVolume" min="0" max="1" step="0.01" value="0.5">
+        </div>
+    </div>
+
+<script>
+// --- AUDIO ENGINE (Web Audio API) ---
+class AudioEngine {
+    constructor() {
+        this.ctx = null;
+        this.masterGain = null;
+        this.modules = [];
+    }
+
+    startContext() {
+        if (!this.ctx) {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            this.masterGain = this.ctx.createGain();
+            this.masterGain.gain.setValueAtTime(0.5, this.ctx.currentTime);
+            this.masterGain.connect(this.ctx.destination);
+            
+            // Collega lo slider del volume master
+            document.getElementById('masterVolume').addEventListener('input', (e) => {
+                this.masterGain.gain.setValueAtTime(e.target.value, this.ctx.currentTime);
+            });
+        }
+    }
+
+    createOscillator() {
+        this.startContext();
+        let osc = this.ctx.createOscillator();
+        let gain = this.ctx.createGain();
+        
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, this.ctx.currentTime);
+        gain.gain.setValueAtTime(0.2, this.ctx.currentTime); // volume iniziale basso per sicurezza
+        
+        osc.connect(gain);
+        // Di default lo colleghiamo al master, in un sistema complesso useremmo nodi di routing
+        gain.connect(this.masterGain); 
+        osc.start();
+
+        this.renderModuleVisual('Oscillatore', (dom) => {
+            dom.innerHTML += `
+                <label>Tipo Onda</label>
+                <select class="waveType"><option value="sawtooth">Sega</option><option value="square">Quadra</option><option value="sine">Sinu</option></select>
+                <label>Frequenza (Hz)</label>
+                <input type="range" class="freq" min="60" max="1500" value="220">
+                <label>Volume</label>
+                <input type="range" class="vol" min="0" max="1" step="0.05" value="0.2">
+            `;
+            dom.querySelector('.waveType').addEventListener('change', (e) => osc.type = e.target.value);
+            dom.querySelector('.freq').addEventListener('input', (e) => osc.frequency.setValueAtTime(e.target.value, this.ctx.currentTime));
+            dom.querySelector('.vol').addEventListener('input', (e) => gain.gain.setValueAtTime(e.target.value, this.ctx.currentTime));
+        });
+    }
+
+    createFilter() {
+        this.startContext();
+        // Logica per inserire un filtro nella catena (semplificata nel prototipo)
+        alert("Filtro creato! In una versione completa, useresti linee di collegamento (cavi virtuali) tra i moduli.");
+    }
+
+    renderModuleVisual(title, setupControlsFn) {
+        let el = document.createElement('div');
+        el.className = 'module';
+        el.style.left = '50px';
+        el.style.top = '100px';
+        el.innerHTML = `<h4>${title}</h4>`;
+        
+        setupControlsFn(el);
+        document.getElementById('workspace').appendChild(el);
+        this.makeDraggable(el);
+    }
+
+    makeDraggable(el) {
+        let posX = 0, posY = 0, mouseX = 0, mouseY = 0;
+        el.onmousedown = (e) => {
+            if(e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return; // Non dragga se usi i controlli
+            e.preventDefault();
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            document.onmouseup = () => { document.onmouseup = null; document.onmousemove = null; };
+            document.onmousemove = (e) => {
+                posX = mouseX - e.clientX;
+                posY = mouseY - e.clientY;
+                mouseX = e.clientX;
+                mouseY = e.clientY;
+                el.style.top = (el.offsetTop - posY) + "px";
+                el.style.left = (el.offsetLeft - posX) + "px";
+            };
+        };
+    }
+}
+
+const audioEngine = new AudioEngine();
+
+// --- LOGICA PWA (Service Worker & Installazione) ---
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(err => console.log("SW errore:", err));
+}
+
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    document.getElementById('installBtn').style.display = 'block';
+});
+
+document.getElementById('installBtn').addEventListener('click', async () => {
+    if (deferredPrompt) {
+        deferredPrompt.prompt();
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') document.getElementById('installBtn').style.display = 'none';
+        deferredPrompt = null;
+    }
+});
+</script>
+</body>
+</html>
